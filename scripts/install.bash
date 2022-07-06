@@ -2,6 +2,8 @@
 
 set -o errexit -o pipefail -o noclobber -o nounset
 
+set -x
+
 DPKG_OPTS=(
     -o Dpkg::Options::="--force-confold"
 )
@@ -138,6 +140,27 @@ function setup_fedora() {
     restart_libvirt
 }
 
+function setup_opensuse_leap() {
+    sudo zypper refresh
+    sudo zypper install --no-confirm \
+        autoconf \
+        automake \
+        binutils \
+        byacc \
+        cmake \
+        gcc \
+        gcc-c++ \
+        git \
+        libguestfs \
+        libvirt \
+        libvirt-devel \
+        make \
+        qemu-kvm \
+        wget \
+        ;
+    restart_libvirt
+}
+
 function setup_ubuntu_1804() {
     setup_apt
     sudo -E apt-get -y "${DPKG_OPTS[@]}" install \
@@ -209,6 +232,14 @@ function install_rake_fedora() {
         rubygem-rake
 }
 
+function install_rake_opensuse_leap() {
+    bundler_pkg=$(sudo zypper --terse -n --quiet search --provides "rubygem(bundler)" | tail -n1 | cut -d' ' -f4)
+    rake_pkg=$(sudo zypper --terse -n --quiet search --provides "rubygem(rake)" | tail -n1 | cut -d' ' -f4)
+    sudo zypper install --no-confirm \
+        ${bundler_pkg} \
+        ${rake_pkg}
+}
+
 function install_rake_ubuntu() {
     install_rake_debian $@
 }
@@ -234,6 +265,13 @@ function install_vagrant_debian() {
 
 function install_vagrant_fedora() {
     install_vagrant_centos $@
+}
+
+function install_vagrant_opensuse_leap() {
+    local version=$1
+
+    download_vagrant ${version} rpm
+    sudo zypper --terse install --allow-unsigned-rpm --no-confirm /tmp/vagrant_${version}_x86_64.rpm
 }
 
 function install_vagrant_ubuntu() {
@@ -287,11 +325,7 @@ function patch_vagrant_centos_8() {
     export PATH=$(readlink -f ./centos-git-common):$PATH
     chmod a+x ./centos-git-common/*.sh
 
-    setup_rpm_sources_centos LIBSSH_DIR libssh
-    build_libssh ${LIBSSH_DIR}
-
-    setup_rpm_sources_centos KRB5_DIR krb5 krb5-libs
-    build_krb5 ${KRB5_DIR}
+    patch_vagrant_fedora centos
 
     popd
 }
@@ -316,13 +350,47 @@ function setup_rpm_sources_fedora() {
 }
 
 function patch_vagrant_fedora() {
+    local distro="${1:-fedora}"
     mkdir -p patches
     pushd patches
 
-    setup_rpm_sources_fedora LIBSSH_DIR libssh
+    setup_rpm_sources_${distro} LIBSSH_DIR libssh
     build_libssh ${LIBSSH_DIR}
 
-    setup_rpm_sources_fedora KRB5_DIR krb5 krb5-libs
+    setup_rpm_sources_${distro} KRB5_DIR krb5 krb5-libs
+    build_krb5 ${KRB5_DIR}
+
+    popd
+}
+
+function setup_rpm_sources_opensuse_leap() {
+    typeset -n basedir=$1
+    pkg="$2"
+    rpmname="${3:-${pkg}}"
+
+    nvr=$(rpm -q --queryformat "${pkg}-%{version}-%{release}" ${rpmname})
+    nv=$(rpm -q --queryformat "${pkg}-%{version}" ${rpmname})
+    mkdir -p ${pkg}
+    pushd ${pkg}
+
+    [[ ! -e ${nvr}.src.rpm ]] && zypper source-download ${rpmname}
+    rpm2cpio ${nvr}.src.rpm | cpio -imdV
+    rm -rf ${nv}
+    tar xf ${nv}.tar.*z
+
+    basedir=$(realpath ${nv})
+    popd
+}
+
+function patch_vagrant_opensuse_leap() {
+    local distro="${1:-opensuse_leap}"
+    mkdir -p patches
+    pushd patches
+
+    setup_rpm_sources_${distro} LIBSSH_DIR libssh4
+    build_libssh ${LIBSSH_DIR}
+
+    setup_rpm_sources_${distro} KRB5_DIR krb5
     build_krb5 ${KRB5_DIR}
 
     popd
@@ -337,7 +405,7 @@ function install_vagrant() {
 
     eval install_vagrant_${distro} ${version}
 
-    if [[ -n "${distro_version}" ]] && [[ $(type -t patch_vagrant_${distro}_${distro_version} 2>/dev/null) == 'function' ]]
+    if [[ -n "${distro_version}" ]] && [[ $(type -t patch_vagrant_${distro}_${distro_version} ${distro} 2>/dev/null) == 'function' ]]
     then
         echo "running patch_vagrant_${distro}_${distro_version}"
         eval patch_vagrant_${distro}_${distro_version}
@@ -414,7 +482,7 @@ done
 
 echo "Starting vagrant-libvirt installation script"
 
-DISTRO=${DISTRO:-$(awk -F= '/^ID=/{print $2}' /etc/os-release | tr -d '"' | tr '[A-Z]' '[a-z]')}
+DISTRO=${DISTRO:-$(awk -F= '/^ID=/{print $2}' /etc/os-release | tr -d '"' | tr '[A-Z]' '[a-z]' | tr '-' '_')}
 DISTRO_VERSION=${DISTRO_VERSION:-$(awk -F= '/^VERSION_ID/{print $2}' /etc/os-release | tr -d '"' | tr '[A-Z]' '[a-z]' | tr -d '.')}
 
 [[ ${VAGRANT_ONLY} -eq 0 ]] && setup_distro ${DISTRO} ${DISTRO_VERSION}
